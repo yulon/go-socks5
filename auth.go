@@ -5,31 +5,81 @@ import (
 	"io"
 )
 
+/*********************************
+	Clients Negotiation:
+
+	+----+----------+----------+
+	|VER | NMETHODS | METHODS  |
+	+----+----------+----------+
+	| 1  |    1     | 1 to 255 |
+	+----+----------+----------+
+**********************************/
+
+// AuthMethods
 const (
-	NoAuth          = uint8(0)
-	noAcceptable    = uint8(255)
-	UserPassAuth    = uint8(2)
-	userAuthVersion = uint8(1)
-	authSuccess     = uint8(0)
-	authFailure     = uint8(1)
+	// AuthMethodNoAuth X'00' NO AUTHENTICATION REQUIRED
+	AuthMethodNoAuth = uint8(0)
+
+	// X'01' GSSAPI
+
+	// AuthMethodUserPass X'02' USERNAME/PASSWORD
+	AuthMethodUserPass = uint8(2)
+
+	// X'03' to X'7F' IANA ASSIGNED
+
+	// X'80' to X'FE' RESERVED FOR PRIVATE METHODS
+
+	// AuthMethodNoAcceptable X'FF' NO ACCEPTABLE METHODS
+	AuthMethodNoAcceptable = uint8(255)
+)
+
+/************************************************
+	rfc1929 client user/pass negotiation req
+	+----+------+----------+------+----------+
+	|VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+	+----+------+----------+------+----------+
+	| 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+	+----+------+----------+------+----------+
+************************************************/
+/************************************************
+	rfc1929 server user/pass negotiation resp
+				+----+--------+
+				|VER | STATUS |
+				+----+--------+
+				| 1  |   1    |
+				+----+--------+
+************************************************/
+
+const (
+	// AuthUserPassVersion the VER field contains the current version
+	// of the subnegotiation, which is X'01'
+	AuthUserPassVersion = uint8(1)
+	// AuthUserPassStatusSuccess a STATUS field of X'00' indicates success
+	AuthUserPassStatusSuccess = uint8(0)
+	// AuthUserPassStatusFailure if the server returns a `failure'
+	// (STATUS value other than X'00') status, it MUST close the connection.
+	AuthUserPassStatusFailure = uint8(1)
 )
 
 var (
-	UserAuthFailed  = fmt.Errorf("User authentication failed")
-	NoSupportedAuth = fmt.Errorf("No supported authentication mechanism")
+	// ErrUserAuthFailed failed to authenticate
+	ErrUserAuthFailed = fmt.Errorf("User authentication failed")
+	// ErrNoSupportedAuth authenticate method not supported
+	ErrNoSupportedAuth = fmt.Errorf("No supported authentication mechanism")
 )
 
-// A Request encapsulates authentication state provided
+// AuthContext A Request encapsulates authentication state provided
 // during negotiation
 type AuthContext struct {
 	// Provided auth method
 	Method uint8
 	// Payload provided during negotiation.
 	// Keys depend on the used auth method.
-	// For UserPassauth contains Username
+	// For UserPassAuth contains Username
 	Payload map[string]string
 }
 
+// Authenticator auth
 type Authenticator interface {
 	Authenticate(reader io.Reader, writer io.Writer) (*AuthContext, error)
 	GetCode() uint8
@@ -38,13 +88,15 @@ type Authenticator interface {
 // NoAuthAuthenticator is used to handle the "No Authentication" mode
 type NoAuthAuthenticator struct{}
 
+// GetCode implementation of Authenticator
 func (a NoAuthAuthenticator) GetCode() uint8 {
-	return NoAuth
+	return AuthMethodNoAuth
 }
 
+// Authenticate implementation of Authenticator
 func (a NoAuthAuthenticator) Authenticate(reader io.Reader, writer io.Writer) (*AuthContext, error) {
-	_, err := writer.Write([]byte{socks5Version, NoAuth})
-	return &AuthContext{NoAuth, nil}, err
+	_, err := writer.Write([]byte{socks5Version, AuthMethodNoAuth})
+	return &AuthContext{AuthMethodNoAuth, nil}, err
 }
 
 // UserPassAuthenticator is used to handle username/password based
@@ -53,13 +105,15 @@ type UserPassAuthenticator struct {
 	Credentials CredentialStore
 }
 
+// GetCode implementation of Authenticator
 func (a UserPassAuthenticator) GetCode() uint8 {
-	return UserPassAuth
+	return AuthMethodUserPass
 }
 
+// Authenticate implementation of Authenticator
 func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) (*AuthContext, error) {
 	// Tell the client to use user/pass auth
-	if _, err := writer.Write([]byte{socks5Version, UserPassAuth}); err != nil {
+	if _, err := writer.Write([]byte{socks5Version, AuthMethodUserPass}); err != nil {
 		return nil, err
 	}
 
@@ -70,7 +124,7 @@ func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) 
 	}
 
 	// Ensure we are compatible
-	if header[0] != userAuthVersion {
+	if header[0] != AuthUserPassVersion {
 		return nil, fmt.Errorf("Unsupported auth version: %v", header[0])
 	}
 
@@ -95,18 +149,18 @@ func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) 
 
 	// Verify the password
 	if a.Credentials.Valid(string(user), string(pass)) {
-		if _, err := writer.Write([]byte{userAuthVersion, authSuccess}); err != nil {
+		if _, err := writer.Write([]byte{AuthUserPassVersion, AuthUserPassStatusSuccess}); err != nil {
 			return nil, err
 		}
 	} else {
-		if _, err := writer.Write([]byte{userAuthVersion, authFailure}); err != nil {
+		if _, err := writer.Write([]byte{AuthUserPassVersion, AuthUserPassStatusFailure}); err != nil {
 			return nil, err
 		}
-		return nil, UserAuthFailed
+		return nil, ErrUserAuthFailed
 	}
 
 	// Done
-	return &AuthContext{UserPassAuth, map[string]string{"Username": string(user)}}, nil
+	return &AuthContext{AuthMethodUserPass, map[string]string{"Username": string(user)}}, nil
 }
 
 // authenticate is used to handle connection authentication
@@ -132,8 +186,8 @@ func (s *Server) authenticate(conn io.Writer, bufConn io.Reader) (*AuthContext, 
 // noAcceptableAuth is used to handle when we have no eligible
 // authentication mechanism
 func noAcceptableAuth(conn io.Writer) error {
-	conn.Write([]byte{socks5Version, noAcceptable})
-	return NoSupportedAuth
+	conn.Write([]byte{socks5Version, AuthMethodNoAcceptable})
+	return ErrNoSupportedAuth
 }
 
 // readMethods is used to read the number of methods

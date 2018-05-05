@@ -67,7 +67,7 @@ func TestSOCKS5_Connect(t *testing.T) {
 	// Connect, auth and connec to local
 	req := bytes.NewBuffer(nil)
 	req.Write([]byte{5})
-	req.Write([]byte{2, NoAuth, UserPassAuth})
+	req.Write([]byte{2, AuthMethodNoAuth, AuthMethodUserPass})
 	req.Write([]byte{1, 3, 'f', 'o', 'o', 3, 'b', 'a', 'r'})
 	req.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1})
 
@@ -83,8 +83,8 @@ func TestSOCKS5_Connect(t *testing.T) {
 
 	// Verify response
 	expected := []byte{
-		socks5Version, UserPassAuth,
-		1, authSuccess,
+		socks5Version, AuthMethodUserPass,
+		1, AuthUserPassStatusSuccess,
 		5,
 		0,
 		0,

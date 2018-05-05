@@ -50,7 +50,7 @@ type Config struct {
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// Server is reponsible for accepting connections and handling
+// Server is responsible for accepting connections and handling
 // the details of the SOCKS5 protocol
 type Server struct {
 	config      *Config
@@ -114,7 +114,6 @@ func (s *Server) Serve(l net.Listener) error {
 		}
 		go s.ServeConn(conn)
 	}
-	return nil
 }
 
 // ServeConn is used to serve a single connection.
@@ -146,8 +145,8 @@ func (s *Server) ServeConn(conn net.Conn) error {
 
 	request, err := NewRequest(bufConn)
 	if err != nil {
-		if err == unrecognizedAddrType {
-			if err := sendReply(conn, addrTypeNotSupported, nil); err != nil {
+		if err == errUnrecognizedAddrType {
+			if err := sendReply(conn, ReplyAddrTypeNotSupported, nil); err != nil {
 				return fmt.Errorf("Failed to send reply: %v", err)
 			}
 		}
