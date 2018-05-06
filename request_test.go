@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 type MockConn struct {
@@ -22,6 +23,13 @@ func (m *MockConn) Write(b []byte) (int, error) {
 func (m *MockConn) RemoteAddr() net.Addr {
 	return &net.TCPAddr{IP: []byte{127, 0, 0, 1}, Port: 65432}
 }
+
+func (m *MockConn) Read(b []byte) (n int, err error)   { return 0, nil }
+func (m *MockConn) Close() error                       { return nil }
+func (m *MockConn) LocalAddr() net.Addr                { return &net.TCPAddr{IP: net.IPv4zero, Port: 0} }
+func (m *MockConn) SetDeadline(t time.Time) error      { return nil }
+func (m *MockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (m *MockConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func TestRequest_Connect(t *testing.T) {
 	// Create a local listener

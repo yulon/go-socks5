@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/net/context"
 )
@@ -77,6 +78,9 @@ const (
 
 var errUnrecognizedAddrType = fmt.Errorf("Unrecognized address type")
 
+// zeroBindAddr used for TCP connect,  BND.ADDR and BND.PORT is unused
+var zeroBindAddr = AddrSpec{IP: net.IPv4zero, Port: 1080}
+
 // AddressRewriter is used to rewrite a destination transparently
 type AddressRewriter interface {
 	Rewrite(ctx context.Context, request *Request) (context.Context, *AddrSpec)
@@ -123,11 +127,6 @@ type Request struct {
 	bufConn      io.Reader
 }
 
-type conn interface {
-	Write([]byte) (int, error)
-	RemoteAddr() net.Addr
-}
-
 // NewRequest creates a new Request from the tcp connection
 func NewRequest(bufConn io.Reader) (*Request, error) {
 	// Read the version byte
@@ -158,7 +157,7 @@ func NewRequest(bufConn io.Reader) (*Request, error) {
 }
 
 // handleRequest is used for request processing after authentication
-func (s *Server) handleRequest(req *Request, conn conn) error {
+func (s *Server) handleRequest(req *Request, conn net.Conn) error {
 	ctx := context.Background()
 
 	// Resolve the address if we have a FQDN
@@ -198,7 +197,7 @@ func (s *Server) handleRequest(req *Request, conn conn) error {
 }
 
 // handleConnect is used to handle a connect command
-func (s *Server) handleConnect(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request) error {
 	// Check if this is allowed
 	_ctx, ok := s.config.Rules.Allow(ctx, req)
 	if !ok {
@@ -233,9 +232,7 @@ func (s *Server) handleConnect(ctx context.Context, conn conn, req *Request) err
 	defer target.Close()
 
 	// Send success
-	local := target.LocalAddr().(*net.TCPAddr)
-	bind := AddrSpec{IP: local.IP, Port: local.Port}
-	if err := sendReply(conn, ReplySucceeded, &bind); err != nil {
+	if err := sendReply(conn, ReplySucceeded, &zeroBindAddr); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
 
@@ -256,7 +253,7 @@ func (s *Server) handleConnect(ctx context.Context, conn conn, req *Request) err
 }
 
 // handleBind is used to handle a connect command
-func (s *Server) handleBind(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleBind(ctx context.Context, conn net.Conn, req *Request) error {
 	// Check if this is allowed
 	_ctx, ok := s.config.Rules.Allow(ctx, req)
 	if !ok {
@@ -275,7 +272,7 @@ func (s *Server) handleBind(ctx context.Context, conn conn, req *Request) error 
 }
 
 // handleAssociate is used to handle a connect command
-func (s *Server) handleAssociate(ctx context.Context, conn conn, req *Request) error {
+func (s *Server) handleAssociate(ctx context.Context, conn net.Conn, req *Request) error {
 	// Check if this is allowed
 	_ctx, ok := s.config.Rules.Allow(ctx, req)
 	if !ok {
@@ -286,12 +283,43 @@ func (s *Server) handleAssociate(ctx context.Context, conn conn, req *Request) e
 	}
 	ctx = _ctx
 
-	// TODO: Support associate
-	if err := sendReply(conn, ReplyCommandNotSupported, nil); err != nil {
+	// check bindIP 1st
+	if len(s.config.BindIP) == 0 || s.config.BindIP.IsUnspecified() {
+		s.config.BindIP = net.ParseIP("127.0.0.1")
+	}
+
+	bindAddr := AddrSpec{IP: s.config.BindIP, Port: s.config.BindPort}
+
+	if err := sendReply(conn, ReplySucceeded, &bindAddr); err != nil {
 		return fmt.Errorf("Failed to send reply: %v", err)
 	}
+
+	// wait here till the client close the connection
+	// check every 10 secs
+	tmp := []byte{}
+	var neverTimeout time.Time
+	for {
+		conn.SetReadDeadline(time.Now())
+		if _, err := conn.Read(tmp); err == io.EOF {
+			break
+		} else {
+			conn.SetReadDeadline(neverTimeout)
+		}
+		time.Sleep(10 * time.Second)
+	}
+
 	return nil
 }
+
+/***********************************
+	Requests of client:
+
+	+------+----------+----------+
+	| ATYP | DST.ADDR | DST.PORT |
+	+------+----------+----------+
+	|  1   | Variable |    2     |
+	+------+----------+----------+
+************************************/
 
 // readAddrSpec is used to read AddrSpec.
 // Expects an address type byte, follwed by the address and port

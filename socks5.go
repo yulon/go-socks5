@@ -42,6 +42,9 @@ type Config struct {
 	// BindIP is used for bind or udp associate
 	BindIP net.IP
 
+	// BindIP is used for bind or udp associate
+	BindPort int
+
 	// Logger can be used to provide a custom log target.
 	// Defaults to stdout.
 	Logger *log.Logger
@@ -107,6 +110,21 @@ func (s *Server) ListenAndServe(network, addr string) error {
 
 // Serve is used to serve connections from a listener
 func (s *Server) Serve(l net.Listener) error {
+	// open a UDP server if specified in config
+	if s.config.BindPort > 0 {
+		ip, _, _ := net.SplitHostPort(l.Addr().String())
+		addr := net.UDPAddr{
+			Port: s.config.BindPort,
+			IP:   net.ParseIP(ip),
+		}
+
+		c, err := net.ListenUDP("udp", &addr)
+		if err != nil {
+			return err
+		}
+		go s.handleUDP(c)
+	}
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
