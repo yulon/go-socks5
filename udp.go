@@ -22,6 +22,7 @@ func getUDPPacketBuffer() []byte {
 }
 
 func putUDPPacketBuffer(p []byte) {
+	p = p[:cap(p)]
 	udpPacketBufferPool.Put(p)
 }
 
