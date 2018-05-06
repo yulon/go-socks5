@@ -92,7 +92,7 @@ func TestRequest_Connect(t *testing.T) {
 		0,
 		0,
 		1,
-		127, 0, 0, 1,
+		0, 0, 0, 0,
 		0, 0,
 		'p', 'o', 'n', 'g',
 	}
