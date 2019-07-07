@@ -125,7 +125,7 @@ func (a UserPassAuthenticator) Authenticate(reader io.Reader, writer io.Writer) 
 
 	// Ensure we are compatible
 	if header[0] != AuthUserPassVersion {
-		return nil, fmt.Errorf("Unsupported auth version: %v", header[0])
+		return nil, fmt.Errorf("unsupported auth version: %v", header[0])
 	}
 
 	// Get the user name
@@ -168,7 +168,7 @@ func (s *Server) authenticate(conn io.Writer, bufConn io.Reader) (*AuthContext, 
 	// Get the methods
 	methods, err := readMethods(bufConn)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to get auth methods: %v", err)
+		return nil, fmt.Errorf("failed to get auth methods: %v", err)
 	}
 
 	// Select a usable method

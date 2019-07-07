@@ -33,7 +33,7 @@ func (s *Server) handleUDP(udpConn *net.UDPConn) {
 		buffer := getUDPPacketBuffer()
 		n, src, err := udpConn.ReadFromUDP(buffer)
 		if err != nil {
-			s.config.Logger.Printf("[ERR] udp socks: Failed to accept udp traffic: %v", err)
+			s.config.Logger.Printf("udp socks: Failed to accept udp traffic: %v", err)
 		}
 		buffer = buffer[:n]
 		go func() {
@@ -64,16 +64,16 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 	header := []byte{0, 0, 0}
 	if len(udpPacket) <= 3 {
 		err := fmt.Errorf("short UDP package header, %d bytes only", len(udpPacket))
-		s.config.Logger.Printf("[ERR] udp socks: Failed to get UDP package header: %v", err)
+		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", err)
 		return err
 	}
 	if header[0] != 0x00 || header[1] != 0x00 {
 		err := fmt.Errorf("unsupported socks UDP package header, %+v", header[:2])
-		s.config.Logger.Printf("[ERR] udp socks: Failed to parse UDP package header: %v", err)
+		s.config.Logger.Printf("udp socks: Failed to parse UDP package header: %v", err)
 		return err
 	}
 	if header[2] != 0x00 {
-		s.config.Logger.Printf("[ERR] udp socks: %+v", ErrUDPFragmentNoSupported)
+		s.config.Logger.Printf("udp socks: %+v", ErrUDPFragmentNoSupported)
 		return ErrUDPFragmentNoSupported
 	}
 
@@ -83,7 +83,7 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 	targetAddrRawSize := 0
 	errShortAddrRaw := func() error {
 		err := fmt.Errorf("short UDP package Addr. header, %d bytes only", len(targetAddrRaw))
-		s.config.Logger.Printf("[ERR] udp socks: Failed to get UDP package header: %v", err)
+		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", err)
 		return err
 	}
 	if len(targetAddrRaw) < 1+4+2 /* ATYP + DST.ADDR.IPV4 + DST.PORT */ {
@@ -108,7 +108,7 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 		targetAddrSpec.FQDN = string(targetAddrRaw[1+1 : 1+1+addrLen])
 		targetAddrRawSize += (1 + addrLen)
 	default:
-		s.config.Logger.Printf("[ERR] udp socks: Failed to get UDP package header: %v", errUnrecognizedAddrType)
+		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", errUnrecognizedAddrType)
 		return errUnrecognizedAddrType
 	}
 	targetAddrSpec.Port = (int(targetAddrRaw[targetAddrRawSize]) << 8) | int(targetAddrRaw[targetAddrRawSize+1])
@@ -119,8 +119,8 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 	if targetAddrSpec.FQDN != "" {
 		_, addr, err := s.config.Resolver.Resolve(nil, targetAddrSpec.FQDN)
 		if err != nil {
-			err := fmt.Errorf("Failed to resolve destination '%v': %v", targetAddrSpec.FQDN, err)
-			s.config.Logger.Printf("[ERR] udp socks: %+v", err)
+			err := fmt.Errorf("failed to resolve destination '%v': %v", targetAddrSpec.FQDN, err)
+			s.config.Logger.Printf("udp socks: %+v", err)
 			return err
 		}
 		targetAddrSpec.IP = addr
@@ -129,20 +129,20 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 	// make a writer and write to dst
 	targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddrSpec.Address())
 	if err != nil {
-		err := fmt.Errorf("Failed to resolve destination UDP Addr '%v': %v", targetAddrSpec.Address(), err)
+		err := fmt.Errorf("failed to resolve destination UDP Addr '%v': %v", targetAddrSpec.Address(), err)
 		return err
 	}
 	target, err := net.DialUDP("udp", udpClientSrcAddr, targetUDPAddr)
 	if err != nil {
-		err = fmt.Errorf("Connect to %v failed: %v", targetUDPAddr, err)
-		s.config.Logger.Printf("[ERR] udp socks: %+v", err)
+		err = fmt.Errorf("connect to %v failed: %v", targetUDPAddr, err)
+		s.config.Logger.Printf("udp socks: %+v", err)
 		return err
 	}
 	defer target.Close()
 
 	// write data to target and read the response back
 	if _, err := target.Write(udpPacket[len(header)+len(targetAddrRaw):]); err != nil {
-		s.config.Logger.Printf("[ERR] udp socks: fail to write udp data to dest %s: %+v",
+		s.config.Logger.Printf("udp socks: fail to write udp data to dest %s: %+v",
 			targetUDPAddr.String(), err)
 		return err
 	}
@@ -152,14 +152,14 @@ func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error 
 	copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
 	n, err := target.Read(respBuffer[len(header)+len(targetAddrRaw):])
 	if err != nil {
-		s.config.Logger.Printf("[ERR] udp socks: fail to read udp resp from dest %s: %+v",
+		s.config.Logger.Printf("udp socks: fail to read udp resp from dest %s: %+v",
 			targetUDPAddr.String(), err)
 		return err
 	}
 	respBuffer = respBuffer[:len(header)+len(targetAddrRaw)+n]
 
 	if reply(respBuffer); err != nil {
-		s.config.Logger.Printf("[ERR] udp socks: fail to send udp resp back: %+v", err)
+		s.config.Logger.Printf("udp socks: fail to send udp resp back: %+v", err)
 		return err
 	}
 	return nil
