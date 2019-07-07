@@ -13,6 +13,7 @@ const (
 	socks5Version = uint8(5)
 )
 
+// ErrorLogger error handler, compatible with std logger
 type ErrorLogger interface {
 	Printf(format string, v ...interface{})
 }
