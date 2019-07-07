@@ -3,7 +3,7 @@ go:
   - 1.12
 
 before_install:
-  - go get -u -v github.com/golang/lint/golint
+  - go get -u -v golang.org/x/lint/golint
 
 script:
   - diff -u <(echo -n) <(gofmt -s -d ./)
