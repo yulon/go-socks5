@@ -137,8 +137,8 @@ func (s *Server) proxyUDP(cltUDPAddr *net.UDPAddr, destAddr string, svrUDPConn *
 		for {
 			n, destAddr, err := udpPxyConn.ReadFrom(p)
 			if err != nil {
-				s.config.Logger.Printf("udp socks: fail to read udp resp from dest %s: %+v",
-					destAddr.String(), err)
+				s.config.Logger.Printf("udp socks: fail to read udp resp from dest %v: %+v",
+					destAddr, err)
 				return
 			}
 			atomic.StoreInt64(&upci.lastTS, time.Now().Unix())
