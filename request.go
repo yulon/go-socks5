@@ -1,7 +1,9 @@
 package socks5
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -107,6 +109,51 @@ func (a AddrSpec) Address() string {
 		return net.JoinHostPort(a.IP.String(), strconv.Itoa(a.Port))
 	}
 	return net.JoinHostPort(a.FQDN, strconv.Itoa(a.Port))
+}
+
+func (a *AddrSpec) BinarySize() int {
+	if a == nil {
+		return 3 + 4
+	}
+	if a.FQDN != "" {
+		return 3 + 2 + len(a.FQDN)
+	}
+	if a.IP.To4() != nil {
+		return 3 + 4
+	}
+	if a.IP.To16() != nil {
+		return 3 + 16
+	}
+	return 0
+}
+
+func (a *AddrSpec) WriteTo(w io.Writer) (int, error) {
+	if a == nil {
+		binary.Write(w, binary.BigEndian, AddressIPv4)
+		binary.Write(w, binary.BigEndian, []byte{0, 0, 0, 0})
+		binary.Write(w, binary.BigEndian, uint16(0))
+		return 3 + 4, nil
+	}
+	if a.FQDN != "" {
+		binary.Write(w, binary.BigEndian, AddressDomainName)
+		binary.Write(w, binary.BigEndian, len(a.FQDN))
+		binary.Write(w, binary.BigEndian, a.FQDN)
+		binary.Write(w, binary.BigEndian, uint16(a.Port))
+		return 3 + 1 + len(a.FQDN), nil
+	}
+	if a.IP.To4() != nil {
+		binary.Write(w, binary.BigEndian, AddressIPv4)
+		binary.Write(w, binary.BigEndian, a.IP.To4())
+		binary.Write(w, binary.BigEndian, uint16(a.Port))
+		return 3 + 4, nil
+	}
+	if a.IP.To16() != nil {
+		binary.Write(w, binary.BigEndian, AddressIPv6)
+		binary.Write(w, binary.BigEndian, a.IP.To16())
+		binary.Write(w, binary.BigEndian, uint16(a.Port))
+		return 3 + 16, nil
+	}
+	return 0, fmt.Errorf("failed to format address: %v", a)
 }
 
 // A Request represents request received by a server
@@ -231,7 +278,7 @@ func (s *Server) handleConnect(ctx context.Context, conn net.Conn, req *Request)
 	defer target.Close()
 
 	// Send success
-	if err := sendReply(conn, ReplySucceeded, &zeroBindAddr); err != nil {
+	if err := sendReply(conn, ReplySucceeded, nil); err != nil {
 		return fmt.Errorf("failed to send reply: %v", err)
 	}
 
@@ -281,6 +328,12 @@ func (s *Server) handleAssociate(ctx context.Context, conn net.Conn, req *Reques
 		return fmt.Errorf("associate to %v blocked by rules", req.DestAddr)
 	}
 	ctx = _ctx
+
+	if s.config.BindPort <= 0 {
+		if err := sendReply(conn, ReplyCommandNotSupported, nil); err != nil {
+			return fmt.Errorf("Failed to send reply: %v", err)
+		}
+	}
 
 	// check bindIP 1st
 	if len(s.config.BindIP) == 0 || s.config.BindIP.IsUnspecified() {
@@ -374,47 +427,12 @@ func readAddrSpec(r io.Reader) (*AddrSpec, error) {
 
 // sendReply is used to send a reply message
 func sendReply(w io.Writer, resp uint8, addr *AddrSpec) error {
-	// Format the address
-	var addrType uint8
-	var addrBody []byte
-	var addrPort uint16
-	switch {
-	case addr == nil:
-		addrType = AddressIPv4
-		addrBody = []byte{0, 0, 0, 0}
-		addrPort = 0
-
-	case addr.FQDN != "":
-		addrType = AddressDomainName
-		addrBody = append([]byte{byte(len(addr.FQDN))}, addr.FQDN...)
-		addrPort = uint16(addr.Port)
-
-	case addr.IP.To4() != nil:
-		addrType = AddressIPv4
-		addrBody = []byte(addr.IP.To4())
-		addrPort = uint16(addr.Port)
-
-	case addr.IP.To16() != nil:
-		addrType = AddressIPv6
-		addrBody = []byte(addr.IP.To16())
-		addrPort = uint16(addr.Port)
-
-	default:
-		return fmt.Errorf("failed to format address: %v", addr)
-	}
-
 	// Format the message
-	msg := make([]byte, 6+len(addrBody))
-	msg[0] = socks5Version
-	msg[1] = resp
-	msg[2] = 0 // Reserved
-	msg[3] = addrType
-	copy(msg[4:], addrBody)
-	msg[4+len(addrBody)] = byte(addrPort >> 8)
-	msg[4+len(addrBody)+1] = byte(addrPort & 0xff)
+	buf := bytes.NewBuffer([]byte{socks5Version, resp, 0})
+	addr.WriteTo(buf)
 
 	// Send the message
-	_, err := w.Write(msg)
+	_, err := w.Write(buf.Bytes())
 	return err
 }
 

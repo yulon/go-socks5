@@ -1,48 +1,37 @@
 package socks5
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"sync"
+	"sync/atomic"
+	"time"
 )
 
-const maxUDPPacketSize = 2 * 1024
-
-var udpClientSrcAddr = &net.UDPAddr{IP: net.IPv4zero, Port: 0}
-
-var udpPacketBufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, maxUDPPacketSize, maxUDPPacketSize)
-	},
-}
-
-func getUDPPacketBuffer() []byte {
-	return udpPacketBufferPool.Get().([]byte)
-}
-
-func putUDPPacketBuffer(p []byte) {
-	p = p[:cap(p)]
-	udpPacketBufferPool.Put(p)
-}
-
-//FIXME: insecure implementation of UDP server, anyone could send package here without authentication
-
-func (s *Server) handleUDP(udpConn *net.UDPConn) {
+func (s *Server) handleUDP(svrUDPConn *net.UDPConn) {
+	p := make([]byte, 4096)
 	for {
-		buffer := getUDPPacketBuffer()
-		n, src, err := udpConn.ReadFromUDP(buffer)
+		n, cltUDPAddr, err := svrUDPConn.ReadFromUDP(p)
 		if err != nil {
 			s.config.Logger.Printf("udp socks: Failed to accept udp traffic: %v", err)
+			return
 		}
-		buffer = buffer[:n]
-		go func() {
-			defer putUDPPacketBuffer(buffer)
-			s.serveUDPConn(buffer, func(data []byte) error {
-				_, err := udpConn.WriteToUDP(data, src)
-				return err
-			})
-		}()
+		destAddr, data, err := parseUDPReq(p[:n])
+		if err != nil {
+			return
+		}
+		udpPxyConn, err := s.proxyUDP(cltUDPAddr, destAddr, svrUDPConn)
+		if err != nil {
+			return
+		}
+		rUDPAddr, err := net.ResolveUDPAddr("udp", destAddr)
+		if err != nil {
+			return
+		}
+		udpPxyConn.WriteTo(data, rUDPAddr)
 	}
 }
 
@@ -55,112 +44,117 @@ func (s *Server) handleUDP(udpConn *net.UDPConn) {
     +----+------+------+----------+----------+----------+
 **********************************************************/
 
-// ErrUDPFragmentNoSupported UDP fragments not supported error
-var ErrUDPFragmentNoSupported = errors.New("")
+type udpProxyHeader struct {
+	RSV  uint16 // Reserved X'0000'
+	FRAG byte   // Current fragment number, donnot support fragment here
+}
 
-func (s *Server) serveUDPConn(udpPacket []byte, reply func([]byte) error) error {
-	// RSV  Reserved X'0000'
-	// FRAG Current fragment number, donnot support fragment here
-	header := []byte{0, 0, 0}
-	if len(udpPacket) <= 3 {
-		err := fmt.Errorf("short UDP package header, %d bytes only", len(udpPacket))
-		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", err)
-		return err
-	}
-	if header[0] != 0x00 || header[1] != 0x00 {
-		err := fmt.Errorf("unsupported socks UDP package header, %+v", header[:2])
-		s.config.Logger.Printf("udp socks: Failed to parse UDP package header: %v", err)
-		return err
-	}
-	if header[2] != 0x00 {
-		s.config.Logger.Printf("udp socks: %+v", ErrUDPFragmentNoSupported)
-		return ErrUDPFragmentNoSupported
-	}
+var ErrUDPFragmentNoSupported = errors.New("UDP fragments not supported")
 
-	// Read in the destination address
-	targetAddrRaw := udpPacket[3:]
-	targetAddrSpec := &AddrSpec{}
-	targetAddrRawSize := 0
-	errShortAddrRaw := func() error {
-		err := fmt.Errorf("short UDP package Addr. header, %d bytes only", len(targetAddrRaw))
-		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", err)
-		return err
+func parseUDPReq(pkt []byte) (string, []byte, error) {
+	if len(pkt) <= 3 {
+		return "", nil, fmt.Errorf("short UDP package header, %d bytes only", len(pkt))
 	}
-	if len(targetAddrRaw) < 1+4+2 /* ATYP + DST.ADDR.IPV4 + DST.PORT */ {
-		return errShortAddrRaw()
+	r := bytes.NewReader(pkt)
+	var h udpProxyHeader
+	binary.Read(r, binary.BigEndian, &h)
+	if h.RSV != 0 {
+		return "", nil, fmt.Errorf("unsupported socks UDP package header, %+v", h.RSV)
 	}
-	targetAddrRawSize = 1
-	switch targetAddrRaw[0] {
-	case AddressIPv4:
-		targetAddrSpec.IP = net.IP(targetAddrRaw[targetAddrRawSize : targetAddrRawSize+4])
-		targetAddrRawSize += 4
-	case AddressIPv6:
-		if len(targetAddrRaw) < 1+16+2 {
-			return errShortAddrRaw()
-		}
-		targetAddrSpec.IP = net.IP(targetAddrRaw[1 : 1+16])
-		targetAddrRawSize += 16
-	case AddressDomainName:
-		addrLen := int(targetAddrRaw[1])
-		if len(targetAddrRaw) < 1+1+addrLen+2 {
-			return errShortAddrRaw()
-		}
-		targetAddrSpec.FQDN = string(targetAddrRaw[1+1 : 1+1+addrLen])
-		targetAddrRawSize += (1 + addrLen)
-	default:
-		s.config.Logger.Printf("udp socks: Failed to get UDP package header: %v", errUnrecognizedAddrType)
-		return errUnrecognizedAddrType
+	if h.FRAG != 0 {
+		return "", nil, ErrUDPFragmentNoSupported
 	}
-	targetAddrSpec.Port = (int(targetAddrRaw[targetAddrRawSize]) << 8) | int(targetAddrRaw[targetAddrRawSize+1])
-	targetAddrRawSize += 2
-	targetAddrRaw = targetAddrRaw[:targetAddrRawSize]
-
-	// resolve addr.
-	if targetAddrSpec.FQDN != "" {
-		_, addr, err := s.config.Resolver.Resolve(nil, targetAddrSpec.FQDN)
-		if err != nil {
-			err := fmt.Errorf("failed to resolve destination '%v': %v", targetAddrSpec.FQDN, err)
-			s.config.Logger.Printf("udp socks: %+v", err)
-			return err
-		}
-		targetAddrSpec.IP = addr
-	}
-
-	// make a writer and write to dst
-	targetUDPAddr, err := net.ResolveUDPAddr("udp", targetAddrSpec.Address())
+	addrSpec, err := readAddrSpec(r)
 	if err != nil {
-		err := fmt.Errorf("failed to resolve destination UDP Addr '%v': %v", targetAddrSpec.Address(), err)
-		return err
+		return "", nil, err
 	}
-	target, err := net.DialUDP("udp", udpClientSrcAddr, targetUDPAddr)
-	if err != nil {
-		err = fmt.Errorf("connect to %v failed: %v", targetUDPAddr, err)
-		s.config.Logger.Printf("udp socks: %+v", err)
-		return err
-	}
-	defer target.Close()
+	return addrSpec.Address(), pkt[int(r.Size())-r.Len():], nil
+}
 
-	// write data to target and read the response back
-	if _, err := target.Write(udpPacket[len(header)+len(targetAddrRaw):]); err != nil {
-		s.config.Logger.Printf("udp socks: fail to write udp data to dest %s: %+v",
-			targetUDPAddr.String(), err)
-		return err
-	}
-	respBuffer := getUDPPacketBuffer()
-	defer putUDPPacketBuffer(respBuffer)
-	copy(respBuffer[0:len(header)], header)
-	copy(respBuffer[len(header):len(header)+len(targetAddrRaw)], targetAddrRaw)
-	n, err := target.Read(respBuffer[len(header)+len(targetAddrRaw):])
-	if err != nil {
-		s.config.Logger.Printf("udp socks: fail to read udp resp from dest %s: %+v",
-			targetUDPAddr.String(), err)
-		return err
-	}
-	respBuffer = respBuffer[:len(header)+len(targetAddrRaw)+n]
+func makeUDPResp(addr *AddrSpec, data []byte) []byte {
+	buf := bytes.NewBuffer([]byte{0, 0, 0})
+	addr.WriteTo(buf)
+	buf.Write(data)
+	return buf.Bytes()
+}
 
-	if reply(respBuffer); err != nil {
-		s.config.Logger.Printf("udp socks: fail to send udp resp back: %+v", err)
-		return err
+type udpPxyConnInfo struct {
+	conn   net.PacketConn
+	lastTS int64
+}
+
+func (s *Server) proxyUDP(cltUDPAddr *net.UDPAddr, destAddr string, svrUDPConn *net.UDPConn) (net.PacketConn, error) {
+	cltAddrStr := cltUDPAddr.String()
+
+	v, exist := s.udpPxyConns.Load(cltAddrStr)
+	if exist && v != nil {
+		upci := v.(*udpPxyConnInfo)
+		atomic.StoreInt64(&upci.lastTS, time.Now().Unix())
+		return upci.conn, nil
 	}
-	return nil
+
+	for atomic.LoadInt32(&s.udpPxyConnC) > 4096 {
+		var key interface{}
+		var upci *udpPxyConnInfo
+		s.udpPxyConns.Range(func(k interface{}, v interface{}) bool {
+			soupci := v.(*udpPxyConnInfo)
+			if upci == nil || atomic.LoadInt64(&soupci.lastTS) < atomic.LoadInt64(&upci.lastTS) {
+				key = k
+				upci = soupci
+			}
+			return true
+		})
+		atomic.AddInt32(&s.udpPxyConnC, -1)
+		s.udpPxyConns.Delete(key)
+		upci.conn.Close()
+	}
+
+	lnPkt := s.config.ListenPacket
+	if lnPkt == nil {
+		lnPkt = func(ctx context.Context, network string) (net.PacketConn, error) {
+			return net.ListenPacket(network, "0.0.0.0:0")
+		}
+	}
+	var err error
+	udpPxyConn, err := lnPkt(context.Background(), "udp")
+	if err != nil {
+		return nil, err
+	}
+
+	upci := &udpPxyConnInfo{udpPxyConn, time.Now().Unix()}
+	v, loaded := s.udpPxyConns.LoadOrStore(cltAddrStr, upci)
+	if loaded {
+		udpPxyConn.Close()
+		upci = v.(*udpPxyConnInfo)
+		atomic.StoreInt64(&upci.lastTS, time.Now().Unix())
+		return upci.conn, nil
+	}
+	atomic.AddInt32(&s.udpPxyConnC, 1)
+
+	go func() {
+		p := make([]byte, 2048)
+		defer udpPxyConn.Close()
+		for {
+			n, destAddr, err := udpPxyConn.ReadFrom(p)
+			if err != nil {
+				s.config.Logger.Printf("udp socks: fail to read udp resp from dest %s: %+v",
+					destAddr.String(), err)
+				return
+			}
+			atomic.StoreInt64(&upci.lastTS, time.Now().Unix())
+			rUDPAddr, ok := destAddr.(*net.UDPAddr)
+			if !ok {
+				destAddrStr := destAddr.String()
+				rUDPAddr, err = net.ResolveUDPAddr("udp", destAddrStr)
+				if err != nil {
+					continue
+				}
+			}
+			_, err = svrUDPConn.WriteToUDP(makeUDPResp(&AddrSpec{IP: rUDPAddr.IP, Port: rUDPAddr.Port}, p[:n]), cltUDPAddr)
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return udpPxyConn, nil
 }

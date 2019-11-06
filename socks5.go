@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 )
 
 const (
@@ -55,6 +56,8 @@ type Config struct {
 
 	// Optional function for dialing out
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	ListenPacket func(ctx context.Context, network string) (net.PacketConn, error)
 }
 
 // Server is responsible for accepting connections and handling
@@ -62,6 +65,8 @@ type Config struct {
 type Server struct {
 	config      *Config
 	authMethods map[uint8]Authenticator
+	udpPxyConns sync.Map
+	udpPxyConnC int32
 }
 
 // New creates a new Server and potentially returns an error
@@ -115,16 +120,18 @@ func (s *Server) ListenAndServe(network, addr string) error {
 // Serve is used to serve connections from a listener
 func (s *Server) Serve(l net.Listener) error {
 	// open a UDP server if specified in config
-	if s.config.BindPort > 0 {
-		ip, _, _ := net.SplitHostPort(l.Addr().String())
+	if s.config.BindPort >= 0 {
+		ipStr, _, _ := net.SplitHostPort(l.Addr().String())
 		addr := net.UDPAddr{
+			IP:   net.ParseIP(ipStr),
 			Port: s.config.BindPort,
-			IP:   net.ParseIP(ip),
 		}
-
 		c, err := net.ListenUDP("udp", &addr)
 		if err != nil {
 			return err
+		}
+		if s.config.BindPort == 0 {
+			s.config.BindPort = c.LocalAddr().(*net.UDPAddr).Port
 		}
 		go s.handleUDP(c)
 	}
@@ -132,7 +139,8 @@ func (s *Server) Serve(l net.Listener) error {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			return err
+			s.config.Logger.Printf("socks: Failed to accept an incoming connection: %v", err)
+			continue
 		}
 		go s.ServeConn(conn)
 	}
