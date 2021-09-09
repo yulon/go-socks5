@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -154,6 +155,9 @@ func (s *Server) ServeConn(conn net.Conn) error {
 	// Read the version byte
 	version := []byte{0}
 	if _, err := bufConn.Read(version); err != nil {
+		if err == io.EOF {
+			return err
+		}
 		s.config.Logger.Printf("socks: Failed to get version byte: %v", err)
 		return err
 	}
